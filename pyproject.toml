@@ -1,7 +1,7 @@
 [project]
 name = "kmk"
 version = "0.1.0"
-description = "Global-stage gripper configuration wizard."
+description = "Keypoint-based multi-fingered hand kinematics and configuration tools."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -13,6 +13,10 @@ dependencies = [
     "viser>=1.0.24",
     "yourdfpy>=0.0.60",
 ]
+
+[project.urls]
+Homepage = "https://github.com/kh11kim/kmk.git"
+Repository = "https://github.com/kh11kim/kmk.git"
 
 [dependency-groups]
 dev = [
