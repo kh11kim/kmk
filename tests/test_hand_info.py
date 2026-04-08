@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation as R
 
+import kmk.hand_info as hand_info_module
 from kmk import HandInfo, PointedHandInfo
 from kmk.config.model import GripperConfig
 
@@ -254,6 +256,17 @@ def test_pointed_hand_info_get_keypoints_returns_link_local_dict(tmp_path: Path)
     assert set(pinch_points) == {"thumb_link"}
 
 
+def test_pointed_hand_info_get_contact_points_filters_by_template(tmp_path: Path) -> None:
+    info = PointedHandInfo.from_config(_make_collision_config(tmp_path), seed=19)
+
+    all_contact_points = info.get_contact_points()
+    pinch_contact_points = info.get_contact_points("pinch")
+
+    assert set(all_contact_points) == {"thumb_link", "index_link"}
+    assert set(pinch_contact_points) == {"thumb_link"}
+    assert np.allclose(pinch_contact_points["thumb_link"], info.contact_points["thumb_link"])
+
+
 def test_pointed_hand_info_adds_palm_aligned_points_to_base_link(tmp_path: Path) -> None:
     info = PointedHandInfo.from_config(_make_collision_config(tmp_path), seed=13)
 
@@ -274,6 +287,88 @@ def test_pointed_hand_info_adds_palm_aligned_points_to_base_link(tmp_path: Path)
         ]
     ) * 0.05 @ basis.T
     assert np.allclose(keypoints["base"], expected)
+
+
+def test_sample_contact_points_uses_distance_only_without_contact_axis(monkeypatch: pytest.MonkeyPatch) -> None:
+    urdf = SimpleNamespace(link_map={"thumb_link": SimpleNamespace(collisions=[object()])})
+    points = np.asarray(
+        [
+            [0.000, 0.0, 0.0],
+            [0.001, 0.0, 0.0],
+            [0.002, 0.0, 0.0],
+            [0.003, 0.0, 0.0],
+        ],
+        dtype=float,
+    )
+    normals = np.asarray(
+        [
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    monkeypatch.setattr(
+        hand_info_module,
+        "_sample_collision_surface_points",
+        lambda *_args, **_kwargs: (points.copy(), normals.copy()),
+    )
+
+    sampled = hand_info_module._sample_contact_points(
+        urdf,
+        {"thumb_link": {"point": [0.0, 0.0, 0.0], "contact_radius": 0.01}},
+        num_point_per_link=4,
+    )
+
+    assert sampled["thumb_link"].shape == (4, 3)
+    sampled_sorted = sampled["thumb_link"][np.argsort(sampled["thumb_link"][:, 0])]
+    points_sorted = points[np.argsort(points[:, 0])]
+    assert np.allclose(sampled_sorted, points_sorted)
+
+
+def test_sample_contact_points_ignores_contact_axis_and_uses_radius_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    urdf = SimpleNamespace(link_map={"thumb_link": SimpleNamespace(collisions=[object()])})
+    points = np.asarray(
+        [
+            [0.000, 0.0, 0.0],
+            [0.001, 0.0, 0.0],
+            [0.002, 0.0, 0.0],
+            [0.003, 0.0, 0.0],
+        ],
+        dtype=float,
+    )
+    normals = np.asarray(
+        [
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+        ],
+        dtype=float,
+    )
+    monkeypatch.setattr(
+        hand_info_module,
+        "_sample_collision_surface_points",
+        lambda *_args, **_kwargs: (points.copy(), normals.copy()),
+    )
+
+    sampled = hand_info_module._sample_contact_points(
+        urdf,
+        {
+            "thumb_link": {
+                "point": [0.0, 0.0, 0.0],
+                "contact_radius": 0.01,
+                "contact_axis": [0.0, 0.0, 1.0],
+            }
+        },
+        num_point_per_link=4,
+    )
+
+    expected = points
+    sampled_sorted = sampled["thumb_link"][np.argsort(sampled["thumb_link"][:, 0])]
+    expected_sorted = expected[np.argsort(expected[:, 0])]
+    assert np.allclose(sampled_sorted, expected_sorted)
 
 
 def test_pointed_hand_info_supports_multiple_collision_geometries_per_link(tmp_path: Path) -> None:

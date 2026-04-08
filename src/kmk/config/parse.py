@@ -41,7 +41,11 @@ def parse_urdf_names(path: str | Path) -> ParsedUrdfNames:
     actuated_joint_names = tuple(
         element.attrib["name"]
         for element in joints
-        if element.attrib.get("name") and element.attrib.get("type") not in {"fixed", "floating"}
+        if (
+            element.attrib.get("name")
+            and element.attrib.get("type") not in {"fixed", "floating"}
+            and element.find("mimic") is None
+        )
     )
     return ParsedUrdfNames(
         joint_names=joint_names,

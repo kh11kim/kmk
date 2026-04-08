@@ -102,7 +102,7 @@ def _build_q_batches(
     device: torch.device,
     seed: int,
 ) -> dict[int, list[torch.Tensor]]:
-    kin = HandKinematics(hand_info, device=device)
+    kin = HandKinematics(hand_info).to(device=device)
     generator = torch.Generator(device=device)
     generator.manual_seed(int(seed))
     lb = kin.chain.lb.to(device=device, dtype=torch.float32)
@@ -144,15 +144,13 @@ def _build_points_by_link(hand_info: HandInfo, device: torch.device) -> dict[str
 
 def _instantiate_variant(target: Any, hand_info: HandInfo, device: torch.device) -> Any:
     attempts = (
-        lambda: target(hand_info, device=device),
         lambda: target(hand_info),
-        lambda: target(Path(hand_info.config_path), device=device),
         lambda: target(Path(hand_info.config_path)),
     )
     last_error: Exception | None = None
     for attempt in attempts:
         try:
-            return attempt()
+            return attempt().to(device=device)
         except TypeError as exc:
             last_error = exc
     raise TypeError(f"Failed to instantiate benchmark target {target!r}") from last_error

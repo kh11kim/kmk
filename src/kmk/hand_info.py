@@ -106,18 +106,11 @@ def _sample_contact_points(
         if link_name not in urdf.link_map:
             continue
         radius = float(contact_info.get("contact_radius", default_radius))
-        axis = np.asarray(contact_info.get("contact_axis", [0.0, 0.0, 1.0]), dtype=float)
-        axis_norm = float(np.linalg.norm(axis))
-        if axis_norm == 0.0:
-            axis = np.asarray([0.0, 0.0, 1.0], dtype=float)
-        else:
-            axis = axis / axis_norm
         ref_point = np.asarray(contact_info.get("point", [0.0, 0.0, 0.0]), dtype=float)
 
-        points, normals = _sample_collision_surface_points(urdf, link_name, density=100000)
+        points, _normals = _sample_collision_surface_points(urdf, link_name, density=100000)
         dists = np.linalg.norm(points - ref_point, axis=-1)
-        angles = np.arccos(np.clip(normals @ axis, -1.0, 1.0))
-        mask = (dists < radius) & (angles < np.pi / 2)
+        mask = dists < radius
         if mask.sum() == 0:
             nearest = np.argsort(dists)[: max(num_point_per_link * 10, num_point_per_link)]
             candidate_points = points[nearest]
@@ -240,6 +233,18 @@ class PointedHandInfo(HandInfo):
     @classmethod
     def from_config(cls, config_path: str | Path, *, seed: int) -> "PointedHandInfo":
         return cls(config_path=config_path, seed=seed)
+
+    def get_contact_points(self, template_name: str | None = None) -> dict[str, np.ndarray]:
+        if template_name is None:
+            selected_names = self.contact_anchor_links
+        else:
+            entry = self._require_template(template_name)
+            selected_names = [str(link_name) for link_name in entry.get("active_contact_anchors", [])]
+        return {
+            link_name: np.asarray(self.contact_points[link_name], dtype=float).copy()
+            for link_name in selected_names
+            if link_name in self.contact_points
+        }
 
     def get_keypoints(
         self,

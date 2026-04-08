@@ -127,6 +127,64 @@ def test_cli_from_config_preserves_joint_order(tmp_path: Path, monkeypatch) -> N
     assert captured["joint_order"] == ["j2", "j1"]
 
 
+def test_cli_from_config_relative_path_resolves_from_gripper_root(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "gripper"
+    _write_gripper_root(root)
+    nested = root / "configs"
+    nested.mkdir(parents=True, exist_ok=True)
+    config_path = nested / "existing.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "name": "loaded",
+                "urdf_path": "hand.urdf",
+                "joint_order": ["j2", "j1"],
+                "palm_pose": {"trans": [0.0, 0.0, 0.0], "rpy": [0.0, 0.0, 0.0]},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    cwd_config = tmp_path / "configs"
+    cwd_config.mkdir(parents=True, exist_ok=True)
+    (cwd_config / "existing.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "wrong",
+                "urdf_path": "hand.urdf",
+                "joint_order": ["j1", "j2"],
+                "palm_pose": {"trans": [1.0, 0.0, 0.0], "rpy": [0.0, 0.0, 0.0]},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("builtins.input", lambda prompt: (_ for _ in ()).throw(AssertionError(prompt)))
+    monkeypatch.chdir(tmp_path)
+
+    captured = {}
+
+    class _FakeApp:
+        def __init__(self, session) -> None:
+            self.session = session
+
+        def run_until_complete(self) -> Path:
+            captured["name"] = self.session.config.name
+            captured["from_config"] = self.session.from_config
+            return self.session.save_path
+
+    monkeypatch.setattr(wizard_cli, "create_global_app", lambda session, **kwargs: _FakeApp(session))
+    monkeypatch.setattr(wizard_cli, "create_keypoint_app", lambda session, **kwargs: _FakeApp(session))
+    monkeypatch.setattr(wizard_cli, "create_template_app", lambda session, **kwargs: _FakeApp(session))
+    monkeypatch.setattr(wizard_cli, "create_preview_app", lambda session, **kwargs: _FakeApp(session))
+
+    rc = wizard_cli.main(["--gripper-root", str(root), "--from-config", "configs/existing.yaml"])
+    assert rc == 0
+    assert captured["name"] == "loaded"
+    assert captured["from_config"] == "configs/existing.yaml"
+
+
 def test_cli_prefills_preferred_xml_candidate_when_multiple_exist(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "gripper"
     _write_gripper_root(root)

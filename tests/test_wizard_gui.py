@@ -11,7 +11,7 @@ import yaml
 from kmk.config.model import GripperConfig
 from kmk.config.parse import ParsedUrdfNames
 import kmk.wizard.gui as wizard_gui
-from kmk.wizard.gui import create_global_app, create_keypoint_app
+from kmk.wizard.gui import PreviewWizardGui, create_global_app, create_keypoint_app
 from kmk.wizard.session import WizardSession
 
 
@@ -74,9 +74,19 @@ class _Frame:
         self.wxyz = kwargs.get("wxyz")
         self.visible = kwargs.get("visible", True)
         self._callbacks = []
+        self._drag_start_callbacks = []
+        self._drag_end_callbacks = []
 
     def on_update(self, fn):
         self._callbacks.append(fn)
+        return fn
+
+    def on_drag_start(self, fn):
+        self._drag_start_callbacks.append(fn)
+        return fn
+
+    def on_drag_end(self, fn):
+        self._drag_end_callbacks.append(fn)
         return fn
 
     def trigger_update(self, *, position=None, wxyz=None) -> None:
@@ -85,6 +95,14 @@ class _Frame:
         if wxyz is not None:
             self.wxyz = wxyz
         for callback in list(self._callbacks):
+            callback(None)
+
+    def trigger_drag_start(self) -> None:
+        for callback in list(self._drag_start_callbacks):
+            callback(None)
+
+    def trigger_drag_end(self) -> None:
+        for callback in list(self._drag_end_callbacks):
             callback(None)
 
     def remove(self) -> None:
@@ -124,6 +142,7 @@ class _Scene:
         self.frames = []
         self.controls = []
         self.spheres = []
+        self.point_clouds = []
 
     def add_frame(self, name, **kwargs):
         handle = _Frame(name, kwargs)
@@ -140,6 +159,11 @@ class _Scene:
         self.spheres.append(handle)
         return handle
 
+    def add_point_cloud(self, name, **kwargs):
+        handle = SimpleNamespace(name=name, **kwargs)
+        self.point_clouds.append(handle)
+        return handle
+
 
 class _Gui:
     def add_text(self, *args, initial_value="", **kwargs):
@@ -151,8 +175,9 @@ class _Gui:
         return _Widget(content)
 
     def add_vector3(self, *args, initial_value=(0.0, 0.0, 0.0), **kwargs):
-        _ = (args, kwargs)
-        return _Widget(tuple(initial_value))
+        _ = kwargs
+        value = args[1] if len(args) > 1 else initial_value
+        return _Widget(tuple(value))
 
     def add_button(self, *args, **kwargs):
         _ = args
@@ -183,6 +208,42 @@ class _Server:
 
     def stop(self) -> None:
         self.stopped = True
+
+
+class _FakePreviewHandInfo:
+    def __init__(self) -> None:
+        self.template_names = ["pinch"]
+        self.surface_points = {"base": np.asarray([[0.0, 0.0, 0.0]], dtype=float)}
+        self.contact_points = {
+            "finger_a": np.asarray([[0.01, 0.0, 0.0]], dtype=float),
+            "finger_b": np.asarray([[0.02, 0.0, 0.0]], dtype=float),
+        }
+
+    def get_q_open(self, template: str = "global") -> np.ndarray:
+        _ = template
+        return np.asarray([0.0, 0.0], dtype=float)
+
+    def get_q_close(self, template_name: str) -> np.ndarray:
+        _ = template_name
+        return np.asarray([0.1, 0.2], dtype=float)
+
+    def get_contact_points(self, template_name: str | None = None) -> dict[str, np.ndarray]:
+        if template_name == "pinch":
+            return {"finger_a": self.contact_points["finger_a"].copy()}
+        return {name: points.copy() for name, points in self.contact_points.items()}
+
+    def get_keypoints(
+        self,
+        template_name: str | None = None,
+        palm_aligned_points: bool = True,
+        palm_points_delta: float = 0.05,
+    ) -> dict[str, np.ndarray]:
+        _ = (template_name, palm_aligned_points, palm_points_delta)
+        return {"finger_a": np.asarray([[0.03, 0.0, 0.0]], dtype=float)}
+
+    def get_grasp_target_point(self, template_name: str) -> np.ndarray:
+        _ = template_name
+        return np.asarray([0.0, 0.0, 0.0], dtype=float)
 
 
 @dataclass
@@ -245,9 +306,11 @@ def test_create_global_app_syncs_palm_pose_and_collision_pairs(tmp_path: Path) -
 
     app.palm_trans_widget.value = (0.1, 0.2, 0.3)
     app.palm_rpy_widget.value = (10.0, 20.0, 30.0)
+    app.palm_points_delta_widget.value = 0.08
     app.q_open_joint_widgets["j1"].value = 0.25
     app.q_open_joint_widgets["j2"].value = -0.5
     assert app.config.palm_pose == {"trans": [0.1, 0.2, 0.3], "rpy": [10.0, 20.0, 30.0]}
+    assert app.config.palm_points_delta == pytest.approx(0.08)
     assert app.config.q_open == [0.0, 0.0]
 
     app.set_q_open_button.click()
@@ -259,12 +322,198 @@ def test_create_global_app_syncs_palm_pose_and_collision_pairs(tmp_path: Path) -
     app.set_collision_pair_button.click()
     assert app.config.additional_collision_ignore_pairs == [["finger_a", "finger_b"]]
 
+
+def test_create_global_app_preserves_palm_pose_components_on_widget_updates(tmp_path: Path) -> None:
+    session = _make_session(tmp_path)
+    session.config.palm_pose = {"trans": [0.1, 0.2, 0.3], "rpy": [10.0, 20.0, 30.0]}
+    server = _Server()
+
+    def _fake_gripper_factory(**kwargs):
+        _ = kwargs
+        return _FakeGripper(
+            handle=SimpleNamespace(_meshes=[]),
+            joint_order=["j1", "j2"],
+            q_dict={"j1": 0.0, "j2": 0.0},
+            lb={"j1": -1.0, "j2": -1.0},
+            ub={"j1": 1.0, "j2": 1.0},
+        )
+
+    app = create_global_app(session, server=server, gripper_factory=_fake_gripper_factory)
+    initial_controls = app.palm_controls
+
+    app.palm_rpy_widget.value = (15.0, 25.0, 35.0)
+    assert app.config.palm_pose["trans"] == [0.1, 0.2, 0.3]
+    assert app.palm_controls is not initial_controls
+    assert tuple(float(v) for v in app.palm_controls.position) == (0.1, 0.2, 0.3)
+
+    second_controls = app.palm_controls
+    app.palm_trans_widget.value = (0.4, 0.5, 0.6)
+    assert app.config.palm_pose["rpy"] == pytest.approx([15.0, 25.0, 35.0])
+    assert app.palm_controls is not second_controls
+    assert tuple(float(v) for v in app.palm_controls.position) == (0.4, 0.5, 0.6)
+
     app.save_and_continue_button.click()
     saved = yaml.safe_load(session.save_path.read_text(encoding="utf-8"))
-    assert saved["palm_pose"] == {"trans": [0.1, 0.2, 0.3], "rpy": [10.0, 20.0, 30.0]}
-    assert saved["q_open"] == [0.25, -0.5]
-    assert saved["additional_collision_ignore_pairs"] == [["finger_a", "finger_b"]]
+    assert saved["palm_pose"]["trans"] == [0.4, 0.5, 0.6]
+    assert saved["palm_pose"]["rpy"] == pytest.approx([15.0, 25.0, 35.0])
+    assert saved["palm_points_delta"] == pytest.approx(0.05)
     assert server.stopped is True
+
+
+def test_create_global_app_ignores_stale_palm_control_update_after_widget_change(tmp_path: Path) -> None:
+    session = _make_session(tmp_path)
+    session.config.palm_pose = {"trans": [0.1, 0.2, 0.3], "rpy": [10.0, 20.0, 30.0]}
+    server = _Server()
+
+    def _fake_gripper_factory(**kwargs):
+        _ = kwargs
+        return _FakeGripper(
+            handle=SimpleNamespace(_meshes=[]),
+            joint_order=["j1", "j2"],
+            q_dict={"j1": 0.0, "j2": 0.0},
+            lb={"j1": -1.0, "j2": -1.0},
+            ub={"j1": 1.0, "j2": 1.0},
+        )
+
+    app = create_global_app(session, server=server, gripper_factory=_fake_gripper_factory)
+
+    app.palm_rpy_widget.value = (15.0, 25.0, 35.0)
+    old_controls = app.palm_controls
+    stale_wxyz = wizard_gui._rpy_to_wxyz([10.0, 20.0, 30.0])
+    old_controls.trigger_update(position=(0.0, 0.0, 0.0), wxyz=stale_wxyz)
+
+    assert app.config.palm_pose["trans"] == [0.1, 0.2, 0.3]
+    assert app.config.palm_pose["rpy"] == pytest.approx([15.0, 25.0, 35.0])
+    assert tuple(float(v) for v in app.palm_trans_widget.value) == (0.1, 0.2, 0.3)
+    assert tuple(float(v) for v in app.palm_rpy_widget.value) == (15.0, 25.0, 35.0)
+
+    fresh_wxyz = wizard_gui._rpy_to_wxyz([5.0, 6.0, 7.0])
+    app.palm_controls.trigger_drag_start()
+    app.palm_controls.trigger_update(position=(0.7, 0.8, 0.9), wxyz=fresh_wxyz)
+    app.palm_controls.trigger_drag_end()
+    assert app.config.palm_pose["trans"] == [0.7, 0.8, 0.9]
+    assert app.config.palm_pose["rpy"] == pytest.approx([5.0, 6.0, 7.0])
+
+
+def test_create_global_app_ignores_non_drag_palm_control_updates(tmp_path: Path) -> None:
+    session = _make_session(tmp_path)
+    session.config.palm_pose = {"trans": [0.1, 0.2, 0.3], "rpy": [10.0, 20.0, 30.0]}
+    server = _Server()
+
+    def _fake_gripper_factory(**kwargs):
+        _ = kwargs
+        return _FakeGripper(
+            handle=SimpleNamespace(_meshes=[]),
+            joint_order=["j1", "j2"],
+            q_dict={"j1": 0.0, "j2": 0.0},
+            lb={"j1": -1.0, "j2": -1.0},
+            ub={"j1": 1.0, "j2": 1.0},
+        )
+
+    app = create_global_app(session, server=server, gripper_factory=_fake_gripper_factory)
+
+    app.palm_controls.trigger_update(
+        position=(0.7, 0.8, 0.9),
+        wxyz=wizard_gui._rpy_to_wxyz([5.0, 6.0, 7.0]),
+    )
+
+    assert app.config.palm_pose["trans"] == [0.1, 0.2, 0.3]
+    assert app.config.palm_pose["rpy"] == [10.0, 20.0, 30.0]
+
+
+def test_saved_contact_anchor_sphere_uses_visible_rgb_color(tmp_path: Path) -> None:
+    session = _make_session(tmp_path)
+    session.config.contact_anchors = {
+        "finger_a": {
+            "point": [0.01, 0.02, 0.03],
+            "contact_radius": 0.007,
+            "tags": [],
+        }
+    }
+    server = _Server()
+
+    app = create_keypoint_app(
+        session,
+        server=server,
+        gripper_factory=lambda **kwargs: _FakeGripper(
+            handle=SimpleNamespace(_meshes=[]),
+            joint_order=["j1", "j2"],
+            q_dict={"j1": 0.0, "j2": 0.0},
+            lb={"j1": -1.0, "j2": -1.0},
+            ub={"j1": 1.0, "j2": 1.0},
+        ),
+    )
+
+    sphere = app.contact_anchor_saved_spheres["finger_a"]
+    assert sphere.color == (51, 178, 255)
+
+
+def test_preview_render_filters_contact_points_by_template() -> None:
+    server = _Server()
+    hand_info = _FakePreviewHandInfo()
+    gripper = _FakeGripper(
+        handle=SimpleNamespace(_meshes=[]),
+        joint_order=["j1", "j2"],
+        q_dict={"j1": 0.0, "j2": 0.0},
+        lb={"j1": -1.0, "j2": -1.0},
+        ub={"j1": 1.0, "j2": 1.0},
+    )
+    app = PreviewWizardGui(
+        session=None,
+        config=GripperConfig(
+            name="demo",
+            urdf_path="hand.urdf",
+            joint_order=["j1", "j2"],
+            palm_pose={"trans": [0.0, 0.0, 0.0], "rpy": [0.0, 0.0, 0.0]},
+        ),
+        save_path=Path("/tmp/demo.yaml"),
+        server=server,
+        gripper=gripper,
+        root_path=Path("/tmp"),
+        hand_info=hand_info,
+        status_widget=_Widget(""),
+        notice_widget=_Widget(""),
+        save_path_widget=_Widget(""),
+        template_widget=_Widget("pinch"),
+        q_mode_widget=_Widget("q_open"),
+        palm_aligned_widget=_Widget(True),
+        show_surface_widget=_Widget(False),
+        show_contact_widget=_Widget(True),
+        show_keypoints_widget=_Widget(False),
+        show_palm_widget=_Widget(False),
+        confirmed_button=_Button(),
+    )
+
+    app.render()
+
+    assert set(app.contact_handles) == {"finger_a"}
+
+
+def test_global_app_draws_palm_points_preview_and_saves_delta(tmp_path: Path) -> None:
+    session = _make_session(tmp_path)
+    session.config.palm_pose = {"trans": [0.1, 0.2, 0.3], "rpy": [10.0, 20.0, 30.0]}
+    session.config.palm_points_delta = 0.09
+    server = _Server()
+
+    app = create_global_app(
+        session,
+        server=server,
+        gripper_factory=lambda **kwargs: _FakeGripper(
+            handle=SimpleNamespace(_meshes=[], _urdf=SimpleNamespace(base_link="base")),
+            joint_order=["j1", "j2"],
+            q_dict={"j1": 0.0, "j2": 0.0},
+            lb={"j1": -1.0, "j2": -1.0},
+            ub={"j1": 1.0, "j2": 1.0},
+        ),
+    )
+
+    assert app.palm_points_handle is not None
+    assert np.asarray(app.palm_points_handle.points).shape == (7, 3)
+    app.palm_points_delta_widget.value = 0.11
+    assert app.config.palm_points_delta == pytest.approx(0.11)
+    app.save()
+    saved = yaml.safe_load(session.save_path.read_text(encoding="utf-8"))
+    assert saved["palm_points_delta"] == pytest.approx(0.11)
 
 
 def test_global_q_open_widgets_follow_config_joint_order(tmp_path: Path) -> None:
@@ -492,6 +741,7 @@ def test_keypoint_add_edit_flow_saves_contact_anchor_and_tags(tmp_path: Path) ->
         ),
     )
 
+    assert app.add_contact_anchor_button.label == "Add/Edit Point"
     app.add_contact_anchor_button.click()
     meshes[0].trigger_click()
     app.contact_point_widget.value = (0.01, 0.02, 0.03)
@@ -499,7 +749,8 @@ def test_keypoint_add_edit_flow_saves_contact_anchor_and_tags(tmp_path: Path) ->
     app.contact_radius_widget.value = 0.02
     assert app.contact_anchor_draft_sphere.radius == 0.02
     app.contact_tags_widget.value = "thumb, tip, outer"
-    app.set_contact_anchor_button.click()
+    assert app.add_contact_anchor_button.label == "Save Point"
+    app.add_contact_anchor_button.click()
 
     assert app.config.contact_anchors == {
         "finger_a": {
@@ -508,6 +759,7 @@ def test_keypoint_add_edit_flow_saves_contact_anchor_and_tags(tmp_path: Path) ->
             "contact_radius": 0.02,
         }
     }
+    assert app.add_contact_anchor_button.label == "Add/Edit Point"
     assert server.scene.spheres[0].radius == 0.02
 
 

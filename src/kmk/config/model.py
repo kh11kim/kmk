@@ -39,6 +39,18 @@ def normalize_palm_pose(palm_pose: dict[str, Any] | None) -> dict[str, list[floa
     return {"trans": trans, "rpy": rpy}
 
 
+def normalize_palm_points_delta(value: Any | None) -> float:
+    if value is None:
+        return 0.05
+    try:
+        delta = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("palm_points_delta must be a numeric value") from exc
+    if delta < 0.0:
+        raise ValueError("palm_points_delta must be non-negative")
+    return delta
+
+
 def normalize_collision_ignore_pairs(
     pairs: Iterable[Sequence[str]] | None,
 ) -> list[list[str]]:
@@ -227,6 +239,7 @@ class GripperConfig:
     q_open: list[float] = field(default_factory=list)
     xml_joint_actuator_alias: dict[str, str] = field(default_factory=dict)
     palm_pose: dict[str, Any] | None = None
+    palm_points_delta: float = 0.05
     additional_collision_ignore_pairs: list[list[str]] = field(default_factory=list)
     contact_anchors: dict[str, dict[str, Any]] = field(default_factory=dict)
     grasp_templates: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -239,6 +252,7 @@ class GripperConfig:
             raise ValueError("urdf_path must be set")
         self.xml_path = normalize_optional_path(self.xml_path)
         self.palm_pose = normalize_palm_pose(self.palm_pose)
+        self.palm_points_delta = normalize_palm_points_delta(self.palm_points_delta)
         self.additional_collision_ignore_pairs = normalize_collision_ignore_pairs(
             self.additional_collision_ignore_pairs
         )
@@ -321,6 +335,7 @@ class GripperConfig:
             "q_open",
             "xml_joint_actuator_alias",
             "palm_pose",
+            "palm_points_delta",
             "additional_collision_ignore_pairs",
             "contact_anchors",
             "grasp_templates",
@@ -338,6 +353,7 @@ class GripperConfig:
             "urdf_path": self.urdf_path,
             "joint_order": list(self.joint_order),
             "palm_pose": self.palm_pose,
+            "palm_points_delta": float(self.palm_points_delta),
         }
         if self.q_open:
             payload["q_open"] = [float(v) for v in self.q_open]

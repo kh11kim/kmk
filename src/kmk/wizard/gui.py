@@ -107,9 +107,19 @@ class _FallbackControls(_FallbackFrame):
     def __init__(self, position: tuple[float, float, float], wxyz: tuple[float, float, float, float]) -> None:
         super().__init__(position, wxyz)
         self._callbacks: list[Callable[[Any], None]] = []
+        self._drag_start_callbacks: list[Callable[[Any], None]] = []
+        self._drag_end_callbacks: list[Callable[[Any], None]] = []
 
     def on_update(self, fn: Callable[[Any], None]) -> Callable[[Any], None]:
         self._callbacks.append(fn)
+        return fn
+
+    def on_drag_start(self, fn: Callable[[Any], None]) -> Callable[[Any], None]:
+        self._drag_start_callbacks.append(fn)
+        return fn
+
+    def on_drag_end(self, fn: Callable[[Any], None]) -> Callable[[Any], None]:
+        self._drag_end_callbacks.append(fn)
         return fn
 
     def trigger_update(
@@ -123,6 +133,14 @@ class _FallbackControls(_FallbackFrame):
         if wxyz is not None:
             self.wxyz = wxyz
         for callback in list(self._callbacks):
+            callback(None)
+
+    def trigger_drag_start(self) -> None:
+        for callback in list(self._drag_start_callbacks):
+            callback(None)
+
+    def trigger_drag_end(self) -> None:
+        for callback in list(self._drag_end_callbacks):
             callback(None)
 
 
@@ -427,6 +445,30 @@ def _link_frame_prefix(server: Any, gripper: Any, config: GripperConfig, link_na
     return f"/{config.name}/{link_name}"
 
 
+def _base_link_name(session: WizardSession | None, gripper: Any) -> str:
+    urdf = getattr(getattr(gripper, "handle", None), "_urdf", None)
+    base_link = getattr(urdf, "base_link", None)
+    if base_link:
+        return str(base_link)
+    if session is not None and session.urdf.link_names:
+        return str(session.urdf.link_names[0])
+    known = sorted(_known_link_names(session, gripper))
+    return known[0] if known else ""
+
+
+def _palm_aligned_points_local(palm_pose: dict[str, Any], palm_points_delta: float) -> np.ndarray:
+    center = np.asarray(palm_pose["trans"], dtype=float)
+    basis = R.from_euler("ZYX", list(reversed(palm_pose["rpy"])), degrees=True).as_matrix()
+    offsets = np.vstack(
+        [
+            np.zeros((1, 3), dtype=float),
+            np.eye(3, dtype=float),
+            -np.eye(3, dtype=float),
+        ]
+    ) * float(palm_points_delta)
+    return center[None, :] + offsets @ basis.T
+
+
 def _remove_handle(handle: Any | None) -> None:
     if handle is None:
         return
@@ -489,8 +531,7 @@ class GlobalWizardGui:
     palm_controls: Any
     palm_trans_widget: Any
     palm_rpy_widget: Any
-    edit_palm_pose_button: Any
-    set_palm_pose_button: Any
+    palm_points_delta_widget: Any
     q_open_summary_widget: Any
     q_open_joint_widgets: dict[str, Any]
     set_q_open_button: Any
@@ -502,9 +543,11 @@ class GlobalWizardGui:
     set_collision_pair_button: Any
     delete_collision_pair_button: Any
     save_and_continue_button: Any
+    palm_points_handle: Any | None = None
     validation_text: str = ""
     last_notice: str | None = None
     syncing_pose: bool = False
+    palm_pose_drag_active: bool = False
     waiting_for_collision_click: bool = False
     collision_pair_first_link: str | None = None
     collision_pair_preview: tuple[str, str] | None = None
@@ -546,6 +589,7 @@ class GlobalWizardGui:
             f"- xml: `{self.config.xml_path or 'none'}`",
             f"- joint_count: `{len(self.config.joint_order)}`",
             f"- q_open_dim: `{len(self.config.q_open)}`",
+            f"- palm_points_delta: `{float(self.config.palm_points_delta):.4f}`",
             f"- save_path: `{_display_relative(self.save_path, root=self.root_path)}`",
             f"- collision_ignore_pairs: `{len(pair_labels)}`",
         ]
@@ -568,14 +612,6 @@ class GlobalWizardGui:
         if current_value not in pair_labels:
             _set_widget_value(self.collision_selected_pair_widget, pair_labels[0] if pair_labels else "")
         _set_widget_value(self.save_path_widget, str(self.save_path))
-
-    def start_palm_pose_edit(self) -> None:
-        if hasattr(self.palm_controls, "visible"):
-            self.palm_controls.visible = True
-
-    def finish_palm_pose_edit(self) -> None:
-        if hasattr(self.palm_controls, "visible"):
-            self.palm_controls.visible = False
 
     def start_collision_pair_selection(self) -> None:
         self.waiting_for_collision_click = True
@@ -636,6 +672,7 @@ class GlobalWizardGui:
             "trans": [float(v) for v in self.palm_trans_widget.value],
             "rpy": [float(v) for v in self.palm_rpy_widget.value],
         }
+        self.config.palm_points_delta = float(self.palm_points_delta_widget.value)
         self.config.q_open = [float(widget.value) for widget in self.q_open_joint_widgets.values()]
         self.config.additional_collision_ignore_pairs = normalize_collision_ignore_pairs(
             self.config.additional_collision_ignore_pairs
@@ -708,6 +745,12 @@ class KeypointWizardGui:
     def _saved_anchor_options(self) -> list[str]:
         return [link_name for link_name in sorted(self.config.contact_anchors)]
 
+    def _refresh_contact_anchor_button(self) -> None:
+        if hasattr(self.add_contact_anchor_button, "label"):
+            self.add_contact_anchor_button.label = (
+                "Save Point" if self.contact_anchor_active_link_name is not None else "Add/Edit Point"
+            )
+
     def _parse_anchor_tags(self, raw: str) -> list[str]:
         tags: list[str] = []
         seen: set[str] = set()
@@ -760,6 +803,7 @@ class KeypointWizardGui:
         self.contact_anchor_draft_gizmo = None
         self.contact_anchor_draft_sphere = None
         self.contact_anchor_active_link_name = None
+        self._refresh_contact_anchor_button()
 
     def _ensure_saved_contact_anchor_sphere(self, link_name: str, entry: dict[str, Any]) -> None:
         prefix = _link_frame_prefix(self.server, self.gripper, self.config, link_name)
@@ -772,7 +816,7 @@ class KeypointWizardGui:
                 sphere = add_icosphere(
                     f"{prefix}/contact_anchor",
                     radius=radius,
-                    color=(0.2, 0.7, 1.0),
+                    color=(51, 178, 255),
                     opacity=0.75,
                     position=position,
                 )
@@ -791,7 +835,7 @@ class KeypointWizardGui:
                 sphere,
                 position=position,
                 radius=radius,
-                color=(0.2, 0.7, 1.0),
+                color=(51, 178, 255),
                 opacity=0.75,
                 visible=True,
             )
@@ -909,6 +953,7 @@ class KeypointWizardGui:
         self._bind_contact_anchor_gizmo()
         self._sync_contact_anchor_draft_visuals(point=point)
         self.last_notice = f"contact anchor editing: {link_name}"
+        self._refresh_contact_anchor_button()
         self.refresh_status()
         return link_name
 
@@ -1540,7 +1585,6 @@ class PreviewWizardGui:
     template_widget: Any
     q_mode_widget: Any
     palm_aligned_widget: Any
-    palm_points_delta_widget: Any
     show_surface_widget: Any
     show_contact_widget: Any
     show_keypoints_widget: Any
@@ -1636,9 +1680,12 @@ class PreviewWizardGui:
             self._clear_group(self.surface_handles)
 
         if bool(self.show_contact_widget.value):
+            contact_points = self.hand_info.get_contact_points(
+                template_name=None if self._template_name() == "global" else self._template_name()
+            )
             self._draw_link_local_clouds(
                 self.contact_handles,
-                self.hand_info.contact_points,
+                contact_points,
                 suffix="preview_contact_points",
                 color=(255, 80, 80),
             )
@@ -1649,7 +1696,7 @@ class PreviewWizardGui:
             keypoints = self.hand_info.get_keypoints(
                 template_name=None if self._template_name() == "global" else self._template_name(),
                 palm_aligned_points=bool(self.palm_aligned_widget.value),
-                palm_points_delta=float(self.palm_points_delta_widget.value),
+                palm_points_delta=float(self.config.palm_points_delta),
             )
             self._draw_link_local_clouds(
                 self.keypoint_handles,
@@ -1712,18 +1759,29 @@ def create_global_app(
     if frame is None:
         frame = _FallbackFrame(palm_trans, palm_wxyz)
 
-    add_controls = getattr(server.scene, "add_transform_controls", None)
-    if callable(add_controls):
-        controls = add_controls(
-            f"/{config.name}/palm_pose_controls",
-            position=palm_trans,
-            wxyz=palm_wxyz,
-            scale=0.12,
-        )
-    else:
-        controls = _FallbackControls(palm_trans, palm_wxyz)
-    if controls is None:
-        controls = _FallbackControls(palm_trans, palm_wxyz)
+    def _make_palm_controls(
+        position: tuple[float, float, float],
+        wxyz: tuple[float, float, float, float],
+    ) -> Any:
+        add_controls = getattr(server.scene, "add_transform_controls", None)
+        if callable(add_controls):
+            controls = add_controls(
+                f"/{config.name}/palm_pose_controls",
+                position=position,
+                wxyz=wxyz,
+                scale=0.12,
+                visible=True,
+            )
+        else:
+            controls = _FallbackControls(position, wxyz)
+        if controls is None:
+            controls = _FallbackControls(position, wxyz)
+        transform_registry = getattr(server.scene, "transform_controls", None)
+        if isinstance(transform_registry, list) and controls in transform_registry:
+            transform_registry.remove(controls)
+        return controls
+
+    controls = _make_palm_controls(palm_trans, palm_wxyz)
 
     save_path_widget = server.gui.add_text("save_path", initial_value=str(ctx.save_path), disabled=True)
     notice_widget = server.gui.add_text("status", initial_value="", disabled=True)
@@ -1746,14 +1804,23 @@ def create_global_app(
                 disabled=True,
             )
         add_vector3 = getattr(server.gui, "add_vector3", None)
+        add_slider = getattr(server.gui, "add_slider", None)
         if callable(add_vector3):
             palm_trans_widget = add_vector3("palm_trans", palm_trans, step=0.001)
             palm_rpy_widget = add_vector3("palm_rpy_deg", tuple(config.palm_pose["rpy"]), step=1.0)
         else:
             palm_trans_widget = _FallbackWidget(palm_trans)
             palm_rpy_widget = _FallbackWidget(tuple(config.palm_pose["rpy"]))
-        edit_palm_pose_button = server.gui.add_button("Edit Palm Pose")
-        set_palm_pose_button = server.gui.add_button("Set Palm Pose")
+        if callable(add_slider):
+            palm_points_delta_widget = add_slider(
+                "palm_points_delta",
+                min=0.0,
+                max=0.2,
+                step=1e-3,
+                initial_value=float(config.palm_points_delta),
+            )
+        else:
+            palm_points_delta_widget = _FallbackWidget(float(config.palm_points_delta))
     with q_open_folder:
         q_open_summary_widget = add_markdown("none") if callable(add_markdown) else _FallbackWidget("none")
         set_q_open_button = server.gui.add_button("Set q_open")
@@ -1782,6 +1849,14 @@ def create_global_app(
                 widget = _FallbackWidget(initial_value)
             q_open_joint_widgets[joint_name] = widget
     with collision_folder:
+        if callable(add_markdown):
+            add_markdown("Adjacent pairs are handled automatically. Add only extra collision-ignore pairs here.")
+        else:
+            server.gui.add_text(
+                "collision_ignore_note",
+                initial_value="Adjacent pairs are handled automatically. Add only extra collision-ignore pairs here.",
+                disabled=True,
+            )
         collision_notice_widget = add_markdown("") if callable(add_markdown) else _FallbackWidget("")
         collision_preview_widget = add_markdown("none") if callable(add_markdown) else _FallbackWidget("none")
         collision_summary_widget = add_markdown("none") if callable(add_markdown) else _FallbackWidget("none")
@@ -1811,8 +1886,7 @@ def create_global_app(
         palm_controls=controls,
         palm_trans_widget=palm_trans_widget,
         palm_rpy_widget=palm_rpy_widget,
-        edit_palm_pose_button=edit_palm_pose_button,
-        set_palm_pose_button=set_palm_pose_button,
+        palm_points_delta_widget=palm_points_delta_widget,
         q_open_summary_widget=q_open_summary_widget,
         q_open_joint_widgets=q_open_joint_widgets,
         set_q_open_button=set_q_open_button,
@@ -1826,7 +1900,59 @@ def create_global_app(
         save_and_continue_button=save_and_continue_button,
     )
     app.refresh_status()
-    app.finish_palm_pose_edit()
+
+    def _draw_palm_points_preview() -> None:
+        _remove_handle(app.palm_points_handle)
+        app.palm_points_handle = None
+        base_link = _base_link_name(app.session, app.gripper)
+        if not base_link:
+            return
+        points = _palm_aligned_points_local(app.config.palm_pose, float(app.palm_points_delta_widget.value))
+        prefix = _link_frame_prefix(server, gripper, config, base_link)
+        add_point_cloud = getattr(server.scene, "add_point_cloud", None)
+        if not callable(add_point_cloud):
+            return
+        app.palm_points_handle = add_point_cloud(
+            f"{prefix}/global_palm_points",
+            points=np.asarray(points, dtype=float),
+            colors=np.tile(np.asarray((255, 214, 10), dtype=np.uint8)[None, :], (len(points), 1)),
+            point_size=0.005,
+            point_shape="rounded",
+        )
+
+    def _bind_palm_controls(handle: Any) -> None:
+        if callable(getattr(handle, "on_drag_start", None)):
+            @handle.on_drag_start
+            def _(_: Any, current_handle: Any = handle) -> None:
+                if app.palm_controls is not current_handle:
+                    return
+                app.palm_pose_drag_active = True
+
+        if callable(getattr(handle, "on_drag_end", None)):
+            @handle.on_drag_end
+            def _(_: Any, current_handle: Any = handle) -> None:
+                if app.palm_controls is not current_handle:
+                    return
+                app.palm_pose_drag_active = False
+
+        @handle.on_update
+        def _(_: Any, current_handle: Any = handle) -> None:
+            if app.palm_controls is not current_handle:
+                return
+            _handle_pose_from_controls(
+                position=tuple(float(v) for v in current_handle.position),
+                wxyz=tuple(float(v) for v in current_handle.wxyz),
+            )
+
+    def _recreate_palm_controls(
+        position: tuple[float, float, float],
+        wxyz: tuple[float, float, float, float],
+    ) -> Any:
+        app.palm_pose_drag_active = False
+        _remove_handle(app.palm_controls)
+        app.palm_controls = _make_palm_controls(position, wxyz)
+        _bind_palm_controls(app.palm_controls)
+        return app.palm_controls
 
     for mesh in getattr(getattr(gripper, "handle", None), "_meshes", []) or []:
         if not callable(getattr(mesh, "on_click", None)):
@@ -1840,60 +1966,87 @@ def create_global_app(
 
     def _sync_pose(
         *,
-        position: tuple[float, float, float] | None = None,
-        rpy_deg: tuple[float, float, float] | None = None,
-        wxyz: tuple[float, float, float, float] | None = None,
+        position: tuple[float, float, float],
+        rpy_deg: tuple[float, float, float],
+        wxyz: tuple[float, float, float, float],
+        update_controls: bool,
+        update_widgets: bool,
+        update_config: bool = True,
     ) -> None:
         if app.syncing_pose:
             return
         app.syncing_pose = True
         try:
-            if position is None:
-                position = tuple(float(v) for v in controls.position)
-            if wxyz is None:
-                wxyz = tuple(float(v) for v in controls.wxyz)
-            if rpy_deg is None:
-                rpy_deg = tuple(_wxyz_to_rpy_deg(wxyz))
-            controls.position = position
-            controls.wxyz = wxyz
+            if update_controls:
+                app.palm_controls.wxyz = wxyz
+                app.palm_controls.position = position
             if hasattr(frame, "position"):
                 frame.position = position
             if hasattr(frame, "wxyz"):
                 frame.wxyz = wxyz
-            _set_widget_value(palm_trans_widget, position)
-            _set_widget_value(palm_rpy_widget, rpy_deg)
-            app.config.palm_pose = {
-                "trans": [float(v) for v in position],
-                "rpy": [float(v) for v in rpy_deg],
-            }
+            if update_widgets:
+                _set_widget_value(palm_trans_widget, position)
+                _set_widget_value(palm_rpy_widget, rpy_deg)
+            if update_config:
+                app.config.palm_pose = {
+                    "trans": [float(v) for v in position],
+                    "rpy": [float(v) for v in rpy_deg],
+                }
+                app.config.palm_points_delta = float(app.palm_points_delta_widget.value)
+            _draw_palm_points_preview()
             app.refresh_status()
         finally:
             app.syncing_pose = False
 
-    @controls.on_update
-    def _(_: Any) -> None:
-        _sync_pose()
+    def _apply_pose_from_widgets() -> None:
+        position = tuple(float(v) for v in palm_trans_widget.value)
+        rpy_deg = tuple(float(v) for v in palm_rpy_widget.value)
+        wxyz = _rpy_to_wxyz(list(rpy_deg))
+        _recreate_palm_controls(position, wxyz)
+        _sync_pose(
+            position=position,
+            rpy_deg=rpy_deg,
+            wxyz=wxyz,
+            update_controls=False,
+            update_widgets=False,
+        )
 
-    @edit_palm_pose_button.on_click
-    def _(_: Any) -> None:
-        app.start_palm_pose_edit()
+    def _handle_pose_from_controls(
+        position: tuple[float, float, float],
+        wxyz: tuple[float, float, float, float],
+    ) -> None:
+        if not app.palm_pose_drag_active:
+            return
 
-    @set_palm_pose_button.on_click
-    def _(_: Any) -> None:
-        app.finish_palm_pose_edit()
+        _sync_pose(
+            position=position,
+            rpy_deg=tuple(_wxyz_to_rpy_deg(wxyz)),
+            wxyz=wxyz,
+            update_controls=False,
+            update_widgets=True,
+        )
+
+    _bind_palm_controls(app.palm_controls)
 
     @palm_trans_widget.on_update
     def _(_: Any) -> None:
         if app.syncing_pose:
             return
-        _sync_pose(position=tuple(float(v) for v in palm_trans_widget.value))
+        _apply_pose_from_widgets()
 
     @palm_rpy_widget.on_update
     def _(_: Any) -> None:
         if app.syncing_pose:
             return
-        rpy_deg = tuple(float(v) for v in palm_rpy_widget.value)
-        _sync_pose(rpy_deg=rpy_deg, wxyz=_rpy_to_wxyz(list(rpy_deg)))
+        _apply_pose_from_widgets()
+
+    @palm_points_delta_widget.on_update
+    def _(_: Any) -> None:
+        if app.syncing_pose:
+            return
+        app.config.palm_points_delta = float(app.palm_points_delta_widget.value)
+        _draw_palm_points_preview()
+        app.refresh_status()
 
     def _sync_gripper_q_open_from_widgets() -> None:
         set_joint_angles = getattr(gripper, "set_joint_angles", None)
@@ -1929,6 +2082,8 @@ def create_global_app(
     @save_and_continue_button.on_click
     def _(_: Any) -> None:
         app.save_and_continue()
+
+    _draw_palm_points_preview()
 
     return app
 
@@ -2011,7 +2166,7 @@ def create_keypoint_app(
             )
         else:
             contact_radius_widget = _FallbackWidget(default_anchor_radius)
-        set_keypoint_button = server.gui.add_button("Save Point")
+        add_keypoint_button = server.gui.add_button("Add/Edit Point")
         if callable(add_dropdown):
             contact_delete_selected_widget = add_dropdown(
                 "saved_points",
@@ -2045,11 +2200,12 @@ def create_keypoint_app(
         contact_radius_widget=contact_radius_widget,
         contact_tags_widget=contact_tags_widget,
         add_contact_anchor_button=add_keypoint_button,
-        set_contact_anchor_button=set_keypoint_button,
+        set_contact_anchor_button=add_keypoint_button,
         delete_contact_anchor_button=delete_keypoint_button,
         save_and_continue_button=save_and_continue_button,
     )
     app.refresh_status()
+    app._refresh_contact_anchor_button()
     for link_name, entry in app.config.contact_anchors.items():
         app._ensure_saved_contact_anchor_sphere(link_name, entry)
 
@@ -2105,15 +2261,13 @@ def create_keypoint_app(
 
     @add_keypoint_button.on_click
     def _(_: Any) -> None:
+        if app.contact_anchor_active_link_name is not None:
+            app.commit_contact_anchor()
+            return
         if app._begin_contact_anchor_click_selection():
             return
         app.last_notice = "contact anchor: select a link first"
         app.refresh_status()
-
-    @set_keypoint_button.on_click
-    def _(_: Any) -> None:
-        app.commit_contact_anchor()
-
     @delete_keypoint_button.on_click
     def _(_: Any) -> None:
         app.delete_contact_anchor()
@@ -2436,10 +2590,6 @@ def create_preview_app(
             show_keypoints_widget = _FallbackWidget(True)
             show_palm_widget = _FallbackWidget(True)
             palm_aligned_widget = _FallbackWidget(True)
-        if callable(add_slider):
-            palm_points_delta_widget = add_slider("palm_points_delta", min=0.0, max=0.2, step=1e-3, initial_value=0.05)
-        else:
-            palm_points_delta_widget = _FallbackWidget(0.05)
         confirmed_button = server.gui.add_button("Confirmed")
 
     app = PreviewWizardGui(
@@ -2456,7 +2606,6 @@ def create_preview_app(
         template_widget=template_widget,
         q_mode_widget=q_mode_widget,
         palm_aligned_widget=palm_aligned_widget,
-        palm_points_delta_widget=palm_points_delta_widget,
         show_surface_widget=show_surface_widget,
         show_contact_widget=show_contact_widget,
         show_keypoints_widget=show_keypoints_widget,
@@ -2491,10 +2640,6 @@ def create_preview_app(
         app.render()
 
     @palm_aligned_widget.on_update
-    def _(_: Any) -> None:
-        app.render()
-
-    @palm_points_delta_widget.on_update
     def _(_: Any) -> None:
         app.render()
 

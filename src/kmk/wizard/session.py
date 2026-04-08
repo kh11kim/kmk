@@ -21,10 +21,7 @@ def _resolve_from_candidates(path: str | Path, *, gripper_root: Path) -> Path:
     candidate = Path(path).expanduser()
     if candidate.is_absolute():
         return candidate.resolve()
-    root_relative = gripper_root / candidate
-    if root_relative.exists():
-        return root_relative.resolve()
-    return (Path.cwd() / candidate).resolve()
+    return (gripper_root / candidate).resolve()
 
 
 def _display_relative(path: Path, *, base: Path) -> str:

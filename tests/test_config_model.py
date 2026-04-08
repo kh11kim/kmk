@@ -15,6 +15,7 @@ def test_save_and_load_roundtrip_preserves_optional_fields(tmp_path: Path) -> No
         joint_order=["j1", "j2"],
         q_open=[0.1, 0.2],
         palm_pose={"trans": [0.0, 0.1, 0.2], "rpy": [1.0, 2.0, 3.0]},
+        palm_points_delta=0.08,
         additional_collision_ignore_pairs=[["link_b", "link_a"], ["link_a", "link_b"]],
         contact_anchors={
             "finger_link": {
@@ -34,6 +35,7 @@ def test_save_and_load_roundtrip_preserves_optional_fields(tmp_path: Path) -> No
     assert loaded.xml_path is None
     assert loaded.joint_order == ["j1", "j2"]
     assert loaded.q_open == [0.1, 0.2]
+    assert loaded.palm_points_delta == pytest.approx(0.08)
     assert loaded.additional_collision_ignore_pairs == [["link_a", "link_b"]]
     assert loaded.contact_anchors == {
         "finger_link": {
@@ -119,6 +121,7 @@ def test_save_and_load_roundtrip_preserves_grasp_templates(tmp_path: Path) -> No
         joint_order=["j1", "j2"],
         q_open=[0.1, 0.2],
         palm_pose={"trans": [0.0, 0.1, 0.2], "rpy": [1.0, 2.0, 3.0]},
+        palm_points_delta=0.06,
         contact_anchors={
             "finger_link": {
                 "point": [0.01, 0.02, 0.03],

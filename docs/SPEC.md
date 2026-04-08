@@ -9,9 +9,10 @@ The goal of this section is to collect and validate hand-level configuration tha
 Current implementation split:
 
 - CLI: `name`, `urdf_path`, `xml_path`, `joint_order`, `--from-config`
-- GUI stage 1: `palm_pose`, `global q_open`, `additional_collision_ignore_pairs`
+- GUI stage 1: `palm_pose`, `palm_points_delta`, `global q_open`, `additional_collision_ignore_pairs`
 - GUI stage 2: `contact_anchors`
 - GUI stage 3: `grasp_templates`
+- GUI stage 4: final preview + `Confirmed`
 
 ## Global Information
 
@@ -37,7 +38,8 @@ The `Global Information` section defines the base robot model references, joint 
 - Description: Path to the gripper URDF file.
 - Constraints:
   - Must resolve to an existing URDF file.
-  - Relative paths are resolved from the configured data root or project root, depending on repository policy.
+  - When stored in YAML, relative paths are resolved from the config file directory at runtime.
+  - During wizard CLI setup, relative `--from-config` paths are resolved from `gripper_root`.
 
 #### `xml_path`
 
@@ -47,6 +49,18 @@ The `Global Information` section defines the base robot model references, joint 
 - Constraints:
   - If provided, it must resolve to an existing XML file.
   - If omitted, the system operates without MuJoCo-specific joint or actuator mapping.
+  - When stored in YAML, relative paths are resolved from the config file directory at runtime.
+
+#### `palm_points_delta`
+
+- Type: `float`
+- Required: yes
+- Description: Distance used for the additional palm-aligned helper points anchored under the base link.
+- Constraints:
+  - Must be non-negative.
+- Notes:
+  - This value is authored in the global stage.
+  - The final preview stage uses the stored value directly and does not expose a separate delta slider.
 
 #### `joint_order`
 
@@ -123,6 +137,7 @@ The `Global Information` section defines the base robot model references, joint 
 - If `xml_path` is provided, the wizard may inspect the XML to suggest alias mappings.
 - The CLI prepopulates `joint_order` from the detected actuated joints.
 - The wizard initializes `palm_pose` to identity if no prior config exists.
+- The wizard initializes `palm_points_delta` to `0.05` if no prior config exists.
 - The wizard initializes `q_open` from the current gripper default/open pose if no prior config exists.
 - The wizard initializes `additional_collision_ignore_pairs` to an empty list if no prior config exists.
 
@@ -131,6 +146,8 @@ The `Global Information` section defines the base robot model references, joint 
 - The user must be able to edit every global field before moving on to later sections.
 - The GUI should show validation feedback immediately for invalid paths, duplicate joint names, or incomplete pose values.
 - Reordering `joint_order` in the CLI stage must update the canonical order used by later sections.
+- The GUI must expose a palm-pose gizmo and vector widgets for editing `palm_pose`.
+- The GUI must expose a `palm_points_delta` control and visualize the resulting palm-aligned helper points during the global stage.
 - The GUI must expose joint sliders for editing `q_open`.
 - The user must be able to add, review, and delete collision-ignore pairs from the global section.
 
@@ -149,6 +166,7 @@ The `Global Information` section defines the base robot model references, joint 
 - `xml_joint_actuator_alias` is optional.
 - If `xml_joint_actuator_alias` is omitted, XML naming defaults to canonical joint names.
 - `palm_pose.trans` and `palm_pose.rpy` must each have length 3.
+- `palm_points_delta` must be non-negative.
 - `additional_collision_ignore_pairs` is optional.
 - Every `additional_collision_ignore_pairs` entry must contain exactly two distinct valid URDF link names.
 - Collision-ignore pairs must be unique after pair-order normalization.
@@ -202,6 +220,9 @@ The intended GUI flow for one anchor is:
 - If the selected link does not yet have an anchor, the GUI starts a new draft for that link.
 - If the selected link already has an anchor, the GUI silently enters edit mode and loads the existing anchor data.
 - Existing saved anchors may also be selected by clicking their saved visualization handle.
+- The primary keypoint action is a toggle button:
+  - idle label: `Add/Edit Point`
+  - active draft label: `Save Point`
 - Saving an existing link overwrites that link's prior anchor data.
 - A separate `Delete Point` action removes the saved anchor for the selected link.
 
@@ -355,6 +376,7 @@ The intended GUI flow for one grasp template is:
 - `PointedHandInfo.from_config(config_path: str | Path, seed: int) -> PointedHandInfo`
 - `surface_points: dict[str, np.ndarray]`
 - `contact_points: dict[str, np.ndarray]`
+- `get_contact_points(template_name: str | None = None) -> dict[str, np.ndarray]`
 
 - `get_keypoints(
     template_name: str | None = None,
@@ -364,12 +386,16 @@ The intended GUI flow for one grasp template is:
 
 ### Runtime Rules
 
-- Sampling behavior follows the `dfc.hand_info` reference implementation.
 - Sampling is performed eagerly during initialization.
 - `surface_points` stores sampled collision-surface points per link in link-local coordinates.
 - `contact_points` stores sampled contact-region points per saved anchor link in link-local coordinates.
+- Contact-point sampling is radius-based:
+  - candidate points are collision-surface samples within `contact_radius` of the saved anchor point
+  - no normal-angle filtering is applied
 - `get_keypoints(template_name=None)` returns all saved contact anchors as `{link_name: points}` with each value shaped `(K, 3)`.
 - `get_keypoints(template_name=...)` returns only that template's active contact anchors.
+- `get_contact_points(template_name=None)` returns sampled contact-region points for all anchors.
+- `get_contact_points(template_name=...)` returns sampled contact-region points only for that template's `active_contact_anchors`.
 - Anchor points returned by `get_keypoints()` are link-local.
 - If `palm_aligned_points=True`, additional palm-frame-axis-aligned points are added under the URDF base link key.
 - Those palm-aligned points are also expressed in the base link local frame.
@@ -390,7 +416,7 @@ It does not own template-specific point-set selection. Higher-level modules may 
 
 ### Public API
 
-- `HandKinematics(hand_info: HandInfo | str | Path, device=None, dtype=torch.float32)`
+- `HandKinematics(hand_info: HandInfo | str | Path)`
 - `joint_order: list[str]`
 - `link_names: list[str]`
 - `dof: int`
@@ -432,7 +458,7 @@ It does not own template-specific point-set selection. Higher-level modules may 
 - Different links may have different `P`.
 - Missing `link_name` values in `points_by_link` raise `KeyError`.
 - All returned values are `torch.Tensor`.
-- All returned tensors use the module `device` and `dtype`.
+- Device and dtype movement are handled through the normal torch module API, e.g. `.to(device=..., dtype=...)`.
 - Implementation should avoid in-place tensor updates in the differentiable forward-kinematics path.
 
 ### Internal Design Direction
