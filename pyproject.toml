@@ -1,0 +1,27 @@
+[project]
+name = "kmk"
+version = "0.1.0"
+description = "Global-stage gripper configuration wizard."
+readme = "SPEC.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.0.0",
+    "pyyaml>=6.0.1",
+    "scipy>=1.13.0",
+    "torch>=2.3.0",
+    "tyro>=0.8.12",
+    "viser>=1.0.24",
+    "yourdfpy>=0.0.60",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.6,<0.10.0"]
+build-backend = "uv_build"
+
+[project.scripts]
+gripper_config_wizard = "kmk.wizard.cli:main"
