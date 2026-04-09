@@ -747,9 +747,19 @@ class KeypointWizardGui:
 
     def _refresh_contact_anchor_button(self) -> None:
         if hasattr(self.add_contact_anchor_button, "label"):
-            self.add_contact_anchor_button.label = (
-                "Save Point" if self.contact_anchor_active_link_name is not None else "Add/Edit Point"
-            )
+            if self.contact_anchor_active_link_name is not None:
+                self.add_contact_anchor_button.label = "Save Point"
+            elif self.waiting_for_contact_anchor_click:
+                self.add_contact_anchor_button.label = "Click Link..."
+            else:
+                self.add_contact_anchor_button.label = "Add/Edit Point"
+        if hasattr(self.add_contact_anchor_button, "color"):
+            if self.contact_anchor_active_link_name is not None:
+                self.add_contact_anchor_button.color = BUTTON_COLOR_ACTIVE_SET
+            elif self.waiting_for_contact_anchor_click:
+                self.add_contact_anchor_button.color = BUTTON_COLOR_ACTIVE_EDIT
+            else:
+                self.add_contact_anchor_button.color = None
 
     def _parse_anchor_tags(self, raw: str) -> list[str]:
         tags: list[str] = []
@@ -901,6 +911,7 @@ class KeypointWizardGui:
             self.syncing_contact_anchor = False
         self.waiting_for_contact_anchor_click = True
         self.last_notice = "contact anchor: click a mesh to choose a link"
+        self._refresh_contact_anchor_button()
         self.refresh_status()
         return True
 
@@ -908,6 +919,7 @@ class KeypointWizardGui:
         if not self.waiting_for_contact_anchor_click:
             return
         self.waiting_for_contact_anchor_click = False
+        self._refresh_contact_anchor_button()
         self._load_contact_anchor_into_widgets(link_name)
         self.start_contact_anchor_draft(link_name)
 
@@ -2136,7 +2148,6 @@ def create_keypoint_app(
                 initial_value="Coordinate frame: link-local.",
                 disabled=True,
             )
-        add_keypoint_button = server.gui.add_button("Add/Edit Point")
         add_text = getattr(server.gui, "add_text", None)
         add_vector3 = getattr(server.gui, "add_vector3", None)
         add_dropdown = getattr(server.gui, "add_dropdown", None)

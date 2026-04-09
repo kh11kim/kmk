@@ -742,7 +742,10 @@ def test_keypoint_add_edit_flow_saves_contact_anchor_and_tags(tmp_path: Path) ->
     )
 
     assert app.add_contact_anchor_button.label == "Add/Edit Point"
+    assert app.add_contact_anchor_button.color is None
     app.add_contact_anchor_button.click()
+    assert app.add_contact_anchor_button.label == "Click Link..."
+    assert app.add_contact_anchor_button.color == wizard_gui.BUTTON_COLOR_ACTIVE_EDIT
     meshes[0].trigger_click()
     app.contact_point_widget.value = (0.01, 0.02, 0.03)
     assert app.contact_anchor_draft_sphere.radius == 0.007
@@ -750,6 +753,7 @@ def test_keypoint_add_edit_flow_saves_contact_anchor_and_tags(tmp_path: Path) ->
     assert app.contact_anchor_draft_sphere.radius == 0.02
     app.contact_tags_widget.value = "thumb, tip, outer"
     assert app.add_contact_anchor_button.label == "Save Point"
+    assert app.add_contact_anchor_button.color == wizard_gui.BUTTON_COLOR_ACTIVE_SET
     app.add_contact_anchor_button.click()
 
     assert app.config.contact_anchors == {
@@ -760,6 +764,7 @@ def test_keypoint_add_edit_flow_saves_contact_anchor_and_tags(tmp_path: Path) ->
         }
     }
     assert app.add_contact_anchor_button.label == "Add/Edit Point"
+    assert app.add_contact_anchor_button.color is None
     assert server.scene.spheres[0].radius == 0.02
 
 
@@ -817,6 +822,8 @@ def test_keypoint_add_button_waits_for_mesh_click_even_with_existing_selection(t
 
     app.contact_selected_link_widget.value = "finger_a"
     app.add_contact_anchor_button.click()
+    assert app.add_contact_anchor_button.label == "Click Link..."
+    assert app.add_contact_anchor_button.color == wizard_gui.BUTTON_COLOR_ACTIVE_EDIT
 
     assert app.waiting_for_contact_anchor_click is True
     assert app.contact_anchor_active_link_name is None
@@ -825,6 +832,8 @@ def test_keypoint_add_button_waits_for_mesh_click_even_with_existing_selection(t
 
     assert app.contact_selected_link_widget.value == "finger_b"
     assert app.contact_anchor_active_link_name == "finger_b"
+    assert app.add_contact_anchor_button.label == "Save Point"
+    assert app.add_contact_anchor_button.color == wizard_gui.BUTTON_COLOR_ACTIVE_SET
 
 
 def test_keypoint_delete_anchor_removes_saved_entry(tmp_path: Path) -> None:
