@@ -267,6 +267,19 @@ def test_pointed_hand_info_get_contact_points_filters_by_template(tmp_path: Path
     assert np.allclose(pinch_contact_points["thumb_link"], info.contact_points["thumb_link"])
 
 
+def test_pointed_hand_info_get_contact_points_by_tag_filters_links(tmp_path: Path) -> None:
+    info = PointedHandInfo.from_config(_make_collision_config(tmp_path), seed=23)
+
+    tip_contact_points = info.get_contact_points_by_tag(includes=["tip"])
+    thumb_contact_points = info.get_contact_points_by_tag(includes=["thumb", "tip"])
+    missing_contact_points = info.get_contact_points_by_tag(includes=["missing"])
+
+    assert set(tip_contact_points) == {"thumb_link", "index_link"}
+    assert set(thumb_contact_points) == {"thumb_link"}
+    assert np.allclose(thumb_contact_points["thumb_link"], info.contact_points["thumb_link"])
+    assert missing_contact_points == {}
+
+
 def test_pointed_hand_info_adds_palm_aligned_points_to_base_link(tmp_path: Path) -> None:
     info = PointedHandInfo.from_config(_make_collision_config(tmp_path), seed=13)
 

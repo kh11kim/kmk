@@ -159,6 +159,23 @@ class HandInfo:
             raise KeyError(link_name)
         return self.config.contact_anchors[link_name]
 
+    def _get_contact_anchor_link_names_by_tag(
+        self,
+        includes: Sequence[str] = (),
+        excludes: Sequence[str] = (),
+    ) -> list[str]:
+        include_tags = set(_normalize_tag_query(includes))
+        exclude_tags = set(_normalize_tag_query(excludes))
+        matches: list[str] = []
+        for link_name, entry in self.config.contact_anchors.items():
+            tags = set(str(tag) for tag in entry.get("tags", []))
+            if include_tags and not include_tags.issubset(tags):
+                continue
+            if exclude_tags and tags.intersection(exclude_tags):
+                continue
+            matches.append(link_name)
+        return matches
+
     def get_q_open(self, template: str = "global") -> np.ndarray:
         if template == "global":
             return np.asarray(self.config.q_open, dtype=float).copy()
@@ -185,17 +202,10 @@ class HandInfo:
         includes: Sequence[str] = (),
         excludes: Sequence[str] = (),
     ) -> dict[str, np.ndarray]:
-        include_tags = set(_normalize_tag_query(includes))
-        exclude_tags = set(_normalize_tag_query(excludes))
-        matches: dict[str, np.ndarray] = {}
-        for link_name, entry in self.config.contact_anchors.items():
-            tags = set(str(tag) for tag in entry.get("tags", []))
-            if include_tags and not include_tags.issubset(tags):
-                continue
-            if exclude_tags and tags.intersection(exclude_tags):
-                continue
-            matches[link_name] = np.asarray(entry["point"], dtype=float).copy()
-        return matches
+        return {
+            link_name: np.asarray(self.config.contact_anchors[link_name]["point"], dtype=float).copy()
+            for link_name in self._get_contact_anchor_link_names_by_tag(includes=includes, excludes=excludes)
+        }
 
     def get_contact_anchor_by_template(self, template_name: str) -> dict[str, np.ndarray]:
         entry = self._require_template(template_name)
@@ -243,6 +253,17 @@ class PointedHandInfo(HandInfo):
         return {
             link_name: np.asarray(self.contact_points[link_name], dtype=float).copy()
             for link_name in selected_names
+            if link_name in self.contact_points
+        }
+
+    def get_contact_points_by_tag(
+        self,
+        includes: Sequence[str] = (),
+        excludes: Sequence[str] = (),
+    ) -> dict[str, np.ndarray]:
+        return {
+            link_name: np.asarray(self.contact_points[link_name], dtype=float).copy()
+            for link_name in self._get_contact_anchor_link_names_by_tag(includes=includes, excludes=excludes)
             if link_name in self.contact_points
         }
 
